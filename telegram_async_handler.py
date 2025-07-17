@@ -970,26 +970,30 @@ class TelegramAsyncHandler:
         """增强的机器人通知 - 修复配置解析"""
         try:
             self.signals.log.emit(f"🔔 {phone} 准备发送机器人通知...")
-    
+
             # 加载机器人配置
             bot_configs = self.main_window.load_resource_file('通知机器人.txt')
             if not bot_configs:
                 self.signals.log.emit(f"⚠️ {phone} 没有配置通知机器人")
                 return
-    
+
             self.signals.log.emit(f"📋 {phone} 加载到 {len(bot_configs)} 个机器人配置")
-    
-            # 构造通知消息
-            notification = f"""📩 新的陌生人消息
 
-🔸 账号: {phone}
-🔸 发送者: {message_data['sender_name']}
-🔸 用户名: @{message_data['sender_username']}
-🔸 手机号: {message_data['sender_phone']}
-🔸 时间: {message_data['timestamp']}
-🔸 内容: {message_data['message']}
+            # 获取程序备注
+            program_remark = self.main_window.get_program_remark()
 
-━━━━━━━━━━━━━━━━━━━━━━"""
+
+            # 构造通知消息 - 使用程序备注
+            notification = f"""📩 来自"{program_remark}"的消息
+
+    🔸 账号: {phone}
+    🔸 发送者: {message_data['sender_name']}
+    🔸 用户名: @{message_data['sender_username']}
+    🔸 手机号: {message_data['sender_phone']}
+    🔸 时间: {message_data['timestamp']}
+    🔸 内容: {message_data['message']}
+
+    ━━━━━━━━━━━━━━━━━━━━━━"""
         
             # 发送到所有配置的机器人
             for i, bot_config in enumerate(bot_configs):
@@ -1213,6 +1217,7 @@ class TelegramAsyncHandler:
             if 'avatar' in profile_data:
                 avatar_path = profile_data.get('avatar')
                 if avatar_path and Path(avatar_path).exists():
+                    
                     # 先删除旧头像
                     photos = await client.get_profile_photos('me')
                     if photos:
