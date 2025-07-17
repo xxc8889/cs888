@@ -646,8 +646,12 @@ class APILoginDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
+        self.accounts = parent.accounts
+        self.config_manager = parent.config_manager
+        self.async_handler = parent.async_handler
+        self.event_loop_thread = parent.event_loop_thread
         self.setupUI()
-        
+    
         # 用于存储正在处理的账号和链接
         self.processing_accounts = {}
         self.timers = {}  # 存储轮询计时器
@@ -660,7 +664,7 @@ class APILoginDialog(QDialog):
         layout = QVBoxLayout(self)
         
         # 账号输入部分
-        input_group = QGroupBox("批量账号")
+        input_group = QGroupBox()
         input_layout = QVBoxLayout(input_group)
         
         description_label = QLabel("请输入账号和API链接，格式: +手机号----API链接，每行一个")
@@ -674,7 +678,7 @@ class APILoginDialog(QDialog):
         layout.addWidget(input_group)
         
         # 状态显示
-        status_group = QGroupBox("登录状态")
+        status_group = QGroupBox()
         status_layout = QVBoxLayout(status_group)
         
         self.status_table = QTableWidget()
@@ -1358,22 +1362,22 @@ class APILoginDialog(QDialog):
         self.check_all_completed()
     
     def stop_account_login(self, phone, update_ui=True):
-        """停止单个账号的登录"""
+        """停止单个账号的登录 - 改进的清理版本"""
         self.parent.log(f"{phone} 开始停止登录流程...")
         
-        # 停止轮询计时器
+        # 1. 停止轮询计时器
         if hasattr(self, 'timers') and phone in self.timers:
             self.timers[phone].stop()
             del self.timers[phone]
             self.parent.log(f"{phone} 停止轮询计时器")
         
-        # 停止重试计时器
+        # 2. 停止重试计时器
         if hasattr(self, 'retry_timers') and phone in self.retry_timers:
             self.retry_timers[phone].stop()
             del self.retry_timers[phone]
             self.parent.log(f"{phone} 停止重试计时器")
         
-        # 取消运行中的任务
+        # 3. 取消运行中的任务
         if hasattr(self, 'running_tasks'):
             for task_key in list(self.running_tasks.keys()):
                 if phone in task_key:
@@ -1383,7 +1387,31 @@ class APILoginDialog(QDialog):
                     del self.running_tasks[task_key]
                     self.parent.log(f"{phone} 取消任务: {task_key}")
         
-        # 移除处理中的账号
+        # 4. 正确断开Telethon客户端连接
+        if self.async_handler and phone in self.async_handler.temp_clients:
+            self.parent.log(f"{phone} 开始断开临时客户端连接...")
+            
+            # 在异步环境中正确断开连接
+            async def disconnect_client():
+                try:
+                    client = self.async_handler.temp_clients[phone]
+                    if client.is_connected():
+                        await client.disconnect()
+                        self.parent.log(f"{phone} 临时客户端连接已断开")
+                    del self.async_handler.temp_clients[phone]
+                except Exception as e:
+                    self.parent.log(f"{phone} 断开临时客户端时出错: {str(e)}")
+            
+            # 提交断开任务到事件循环
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    disconnect_client(), 
+                    self.event_loop_thread.loop
+                )
+            except Exception as e:
+                self.parent.log(f"{phone} 提交断开任务失败: {str(e)}")
+        
+        # 5. 移除处理中的账号
         if phone in self.processing_accounts:
             if update_ui:
                 self.update_status(phone, "已停止")
@@ -1393,15 +1421,62 @@ class APILoginDialog(QDialog):
         self.parent.log(f"{phone} 登录流程已完全停止")
     
     def stop_all_logins(self):
-        """停止所有登录"""
+        """停止所有登录 - 改进版本"""
+        self.parent.log("开始停止所有登录流程...")
+        
         # 复制列表避免在迭代时修改
         phones = list(self.processing_accounts.keys())
+        
+        # 停止所有账号的登录
         for phone in phones:
             self.stop_account_login(phone)
+        
+        # 额外的全局清理
+        async def cleanup_all_clients():
+            """清理所有临时客户端"""
+            try:
+                if self.async_handler and self.async_handler.temp_clients:
+                    clients_to_disconnect = list(self.async_handler.temp_clients.items())
+                    
+                    for phone, client in clients_to_disconnect:
+                        try:
+                            if client.is_connected():
+                                await client.disconnect()
+                                self.parent.log(f"{phone} 全局清理：客户端已断开")
+                        except Exception as e:
+                            self.parent.log(f"{phone} 全局清理断开失败: {str(e)}")
+                    
+                    # 清空临时客户端字典
+                    self.async_handler.temp_clients.clear()
+                    self.parent.log("所有临时客户端已清理")
+                    
+            except Exception as e:
+                self.parent.log(f"全局清理时出错: {str(e)}")
+        
+        # 提交全局清理任务
+        try:
+            asyncio.run_coroutine_threadsafe(
+                cleanup_all_clients(), 
+                self.event_loop_thread.loop
+            )
+        except Exception as e:
+            self.parent.log(f"提交全局清理任务失败: {str(e)}")
         
         # 更新按钮状态
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        
+        self.parent.log("所有登录流程已停止")
+
+    def closeEvent(self, event):
+        """对话框关闭事件 - 确保资源清理"""
+        self.parent.log("API登录对话框正在关闭，清理资源...")
+        
+        # 停止所有登录流程
+        self.stop_all_logins()
+        
+        # 等待一下让清理任务完成
+        QTimer.singleShot(500, lambda: super(APILoginDialog, self).closeEvent(event))
     
     def check_all_completed(self):
         """检查是否所有账号都处理完毕"""
@@ -6506,37 +6581,66 @@ class AccountManager(QMainWindow):
     
     # 建议在关闭时更彻底地清理资源
 def closeEvent(self, event):
-    """关闭事件处理 - 改进版"""
+    """主程序关闭事件处理 - 改进版"""
     try:
-        self.log("正在关闭程序...")
+        self.log("正在关闭程序，清理所有资源...")
         
-        # 1. 停止所有定时器
+        # 1. 关闭所有对话框
+        if hasattr(self, 'api_login_dialog') and self.api_login_dialog:
+            self.api_login_dialog.close()
+        
+        # 2. 停止所有定时器
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
             if isinstance(attr, QTimer):
                 attr.stop()
         
-        # 2. 停止所有异步任务
+        # 3. 停止所有异步任务
         if self.async_handler:
-            asyncio.run_coroutine_threadsafe(
-                self.async_handler.stop_all_tasks(),
-                self.event_loop_thread.loop
-            ).result(timeout=5)  # 添加超时
+            async def cleanup_all():
+                """清理所有异步资源"""
+                try:
+                    # 停止所有任务
+                    await self.async_handler.stop_all_tasks()
+                    
+                    # 断开所有客户端
+                    for phone, client in list(self.async_handler.clients.items()):
+                        try:
+                            if client.is_connected():
+                                await client.disconnect()
+                            self.log(f"{phone} 主程序清理：客户端已断开")
+                        except Exception as e:
+                            self.log(f"{phone} 主程序断开失败: {str(e)}")
+                    
+                    # 断开所有临时客户端
+                    for phone, client in list(self.async_handler.temp_clients.items()):
+                        try:
+                            if client.is_connected():
+                                await client.disconnect()
+                            self.log(f"{phone} 主程序清理：临时客户端已断开")
+                        except Exception as e:
+                            self.log(f"{phone} 主程序临时客户端断开失败: {str(e)}")
+                    
+                    self.log("所有异步资源清理完成")
+                    
+                except Exception as e:
+                    self.log(f"清理异步资源时出错: {str(e)}")
+            
+            # 执行清理并等待完成
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    cleanup_all(), 
+                    self.event_loop_thread.loop
+                )
+                future.result(timeout=3)  # 3秒超时
+            except Exception as e:
+                self.log(f"异步清理超时或失败: {str(e)}")
         
-        # 3. 保存配置
+        # 4. 保存配置
         self.save_config()
         
-        # 4. 停止事件循环
+        # 5. 停止事件循环线程
         self.event_loop_thread.stop()
-        
-        # 5. 清理对话框
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, QDialog):
-                try:
-                    attr.close()
-                except:
-                    pass
         
         self.log("程序关闭完成")
         
