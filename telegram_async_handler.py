@@ -20,6 +20,7 @@ from telethon.tl.functions.photos import UploadProfilePhotoRequest, DeletePhotos
 from telethon.tl.functions.contacts import AddContactRequest, ImportContactsRequest, ResolveUsernameRequest
 from telethon.tl.types import InputPeerEmpty, ChatBannedRights, InputPhoneContact, ChatAdminRights
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
+from device_spoofing import DeviceSpoofing
 import logging
 import json
 
@@ -43,7 +44,11 @@ class TelegramAsyncHandler:
         self.temp_clients = {}  # 临时客户端，用于登录过程
         self.running_tasks = {}
         self.signals = WorkerSignals()
-        
+        self.auto_reply_history = {}  # 记录自动回复历史 {phone: {user_id: last_reply_time}}
+        # 新增：设备伪装实例
+        self.device_spoofing = DeviceSpoofing()
+        self.device_spoofing.load_device_assignments()
+                
         # 任务控制标志 - 改为每个账号独立的标志
         self.stop_flags = {}
         
@@ -258,12 +263,55 @@ class TelegramAsyncHandler:
         session_file = f'sessions/{phone}.session'
         
         try:
+            # 获取设备信息
+
+            device_info = self.device_spoofing.get_device_info(phone)
+
+            self.signals.log.emit(f"{phone} 使用设备: {device_info['device_model']} - {device_info['system_version']}")
+
+            
+
             # 添加代理支持
+
             proxy_config = self.load_proxy_config()
+
             if proxy_config:
-                client = TelegramClient(session_file, api_id, api_hash, proxy=proxy_config)
+
+                client = TelegramClient(
+
+                    session_file, api_id, api_hash, 
+
+                    proxy=proxy_config,
+
+                    device_model=device_info['device_model'],
+
+                    system_version=device_info['system_version'],
+
+                    app_version=device_info['app_version'],
+
+                    lang_code=device_info['lang_code'],
+
+                    system_lang_code=device_info['system_lang_code']
+
+                )
+
             else:
-                client = TelegramClient(session_file, api_id, api_hash)
+
+                client = TelegramClient(
+
+                    session_file, api_id, api_hash,
+
+                    device_model=device_info['device_model'],
+
+                    system_version=device_info['system_version'],
+
+                    app_version=device_info['app_version'],
+
+                    lang_code=device_info['lang_code'],
+
+                    system_lang_code=device_info['system_lang_code']
+
+                )
             
             await client.connect()
             
@@ -411,14 +459,30 @@ class TelegramAsyncHandler:
                 self.signals.log.emit(f"账号 {phone} 缺少API配置")
                 return False
             
-            client = TelegramClient(str(session_file), api_id, api_hash)
+            # 获取设备信息
+            device_info = self.device_spoofing.get_device_info(phone)
             
             try:
                 proxy_config = self.load_proxy_config()
                 if proxy_config:
-                    client = TelegramClient(str(session_file), api_id, api_hash, proxy=proxy_config)
+                    client = TelegramClient(
+                        str(session_file), api_id, api_hash, 
+                        proxy=proxy_config,
+                        device_model=device_info['device_model'],
+                        system_version=device_info['system_version'],
+                        app_version=device_info['app_version'],
+                        lang_code=device_info['lang_code'],
+                        system_lang_code=device_info['system_lang_code']
+                    )
                 else:
-                    client = TelegramClient(str(session_file), api_id, api_hash)
+                    client = TelegramClient(
+                        str(session_file), api_id, api_hash,
+                        device_model=device_info['device_model'],
+                        system_version=device_info['system_version'],
+                        app_version=device_info['app_version'],
+                        lang_code=device_info['lang_code'],
+                        system_lang_code=device_info['system_lang_code']
+                    )
                 await client.connect()
                 if await client.is_user_authorized():
                     # 使用综合检查方法
@@ -581,15 +645,32 @@ class TelegramAsyncHandler:
                 self.signals.log.emit(f"账号 {phone} 缺少API配置")
                 return None
             
+            # 获取设备信息
+            device_info = self.device_spoofing.get_device_info(phone)
+            
             session_file = f'sessions/{phone}.session'
-            client = TelegramClient(session_file, api_id, api_hash)
             
             try:
                 proxy_config = self.load_proxy_config()
                 if proxy_config:
-                    client = TelegramClient(session_file, api_id, api_hash, proxy=proxy_config)
+                    client = TelegramClient(
+                        session_file, api_id, api_hash, 
+                        proxy=proxy_config,
+                        device_model=device_info['device_model'],
+                        system_version=device_info['system_version'],
+                        app_version=device_info['app_version'],
+                        lang_code=device_info['lang_code'],
+                        system_lang_code=device_info['system_lang_code']
+                    )
                 else:
-                    client = TelegramClient(session_file, api_id, api_hash)
+                    client = TelegramClient(
+                        session_file, api_id, api_hash,
+                        device_model=device_info['device_model'],
+                        system_version=device_info['system_version'],
+                        app_version=device_info['app_version'],
+                        lang_code=device_info['lang_code'],
+                        system_lang_code=device_info['system_lang_code']
+                    )
                 await client.connect()
                 if await client.is_user_authorized():
                     self.clients[phone] = client
@@ -615,17 +696,28 @@ class TelegramAsyncHandler:
         return self.clients[phone]
     async def start_stranger_message_monitor(self, phone, auto_reply_enabled=False, bot_notify_enabled=False):
         """启动陌生人消息监听 - 增强版"""
+        self.signals.log.emit(f"🆘 测试修改是否生效 - {phone}")  # 加这行测试
         self.signals.log.emit(f"🔄 正在为 {phone} 启动陌生人消息监听...")
-    
+
         client = await self.ensure_client_connected(phone)
         if not client:
             self.signals.log.emit(f"❌ {phone} 客户端连接失败")
             return False
-    
+
         # 如果已经在监听，先停止
         if phone in self.monitoring_phones:
             await self.stop_stranger_message_monitor(phone)
-    
+
+        # 确保先清理旧的处理器
+        if phone in self.message_handlers:
+            try:
+                client.remove_event_handler(self.message_handlers[phone])
+            except:
+                pass
+        
+        # 然后添加新的处理器
+        client.add_event_handler(handle_all_messages, events.NewMessage(incoming=True))
+
         try:
             # 测试客户端是否正常工作
             try:
@@ -635,52 +727,58 @@ class TelegramAsyncHandler:
                 self.signals.log.emit(f"❌ {phone} 客户端测试失败: {str(e)}")
                 return False
         
-            # 定义消息处理器 - 使用更简单的逻辑先测试
             async def handle_all_messages(event):
                 try:
                     # 只处理私聊消息（不是群组消息）
                     if event.is_private and event.message.text:
                         sender = await event.get_sender()
                     
-                        # 先不判断是否为联系人，直接处理所有私聊消息用于测试
-                        self.signals.log.emit(f"📨 {phone} 收到私聊消息，发送者ID: {sender.id}")
+                        # 检查是否是机器人
+                        if hasattr(sender, 'bot') and sender.bot:
+                            return
                     
-                        # 检查是否为陌生人
-                        is_stranger = not await self.is_contact_enhanced(client, sender)
+                        # 检查是否是联系人 - 使用正确的API
+                        try:
+                            from telethon.tl.functions.contacts import GetContactsRequest
+                            
+                            result = await client(GetContactsRequest(hash=0))
+                            contacts = result.users
+                            
+                            is_contact = any(contact.id == sender.id for contact in contacts)
+                            
+                            if is_contact:
+                                # 如果是联系人，直接返回，不做任何处理
+                                return
+                                
+                        except Exception as e:
+                            # 检查失败时继续处理（当作非联系人）
+                            pass
                     
-                        if is_stranger:
-                            self.signals.log.emit(f"👤 {phone} 确认为陌生人消息")
-                        
-                            # 构建消息数据
-                            message_data = {
-                                'phone': phone,
-                                'sender_id': sender.id,
-                                'sender_name': self.get_user_display_name(sender),
-                                'sender_username': getattr(sender, 'username', '') or '无',
-                                'sender_phone': getattr(sender, 'phone', '') or '未知',
-                                'message': event.message.text[:500],  # 限制长度
-                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                            }
-                        
-                            self.signals.log.emit(f"📤 {phone} 发送陌生人消息信号到UI")
-                        
-                            # 发送到主界面显示
-                            self.signals.stranger_message.emit(message_data)
-                        
-                            # 自动回复
-                            if auto_reply_enabled:
-                                await self.send_auto_reply_enhanced(client, sender, phone)
-                        
-                            # 机器人通知
-                            if bot_notify_enabled:
-                                await self.send_bot_notification_enhanced(phone, message_data)
-                        else:
-                            self.signals.log.emit(f"👥 {phone} 跳过联系人消息")
-                        
+                        # 如果到这里，说明是非联系人消息
+                        # 构建消息数据
+                        message_data = {
+                            'phone': phone,
+                            'sender_id': sender.id,
+                            'sender_name': self.get_user_display_name(sender),
+                            'sender_username': getattr(sender, 'username', '') or '无',
+                            'sender_phone': getattr(sender, 'phone', '') or '未知',
+                            'message': event.message.text[:500],
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                    
+                        # 发送到主界面显示
+                        self.signals.stranger_message.emit(message_data)
+                    
+                        # 自动回复
+                        if auto_reply_enabled:
+                            await self.send_auto_reply_enhanced(client, sender, phone)
+                    
+                        # 机器人通知
+                        if bot_notify_enabled:
+                            await self.send_bot_notification_enhanced(phone, message_data)
+                    
                 except Exception as e:
-                    self.signals.log.emit(f"❌ {phone} 处理消息时出错: {str(e)}")
-                    import traceback
-                    self.signals.log.emit(f"详细错误: {traceback.format_exc()}")
+                    pass  # 简化错误处理
         
             # 注册事件处理器
             self.signals.log.emit(f"🔗 {phone} 正在注册事件处理器...")
@@ -691,8 +789,6 @@ class TelegramAsyncHandler:
             self.monitoring_phones.add(phone)
         
             self.signals.log.emit(f"✅ {phone} 陌生人消息监听启动成功")
-        
-            # 发送测试日志确认监听正常
             self.signals.log.emit(f"🎯 {phone} 监听器已激活，等待接收消息...")
         
             return True
@@ -702,7 +798,23 @@ class TelegramAsyncHandler:
             import traceback
             self.signals.log.emit(f"详细错误: {traceback.format_exc()}")
             return False
-
+    
+    async def is_non_contact(self, client, user):
+        """判断是否为非联系人"""
+        try:
+            # 检查是否在联系人列表中
+            contacts = await client.get_contacts()
+            for contact in contacts:
+                if contact.id == user.id:
+                    return False  # 在联系人列表中，不是非联系人
+            
+            # 不在联系人列表中，就是非联系人
+            return True
+            
+        except Exception as e:
+            self.signals.log.emit(f"检查非联系人状态失败: {str(e)}")
+            return False  # 出错时保守处理
+    
     async def is_contact(self, client, user):
         """检查用户是否为联系人"""
         try:
@@ -716,8 +828,21 @@ class TelegramAsyncHandler:
             return False
 
     async def send_auto_reply_enhanced(self, client, sender, phone):
-        """增强的自动回复 - 修复编码问题"""
+        """增强的自动回复 - 24小时内同一用户只回复一次"""
         try:
+            sender_id = sender.id
+            current_time = datetime.now()
+            
+            # 检查是否已经在24小时内回复过
+            if phone in self.auto_reply_history:
+                if sender_id in self.auto_reply_history[phone]:
+                    last_reply_time = self.auto_reply_history[phone][sender_id]
+                    time_diff = current_time - last_reply_time
+                    if time_diff.total_seconds() < 86400:  # 24小时 = 86400秒
+                        remaining_hours = (86400 - time_diff.total_seconds()) / 3600
+                        self.signals.log.emit(f"⏰ {phone} 跳过自动回复 - 用户 {sender_id} 在 {remaining_hours:.1f} 小时前已回复过")
+                        return
+            
             self.signals.log.emit(f"🤖 {phone} 准备发送自动回复...")
 
             # 标记消息为已读
@@ -730,7 +855,6 @@ class TelegramAsyncHandler:
             # 加载自动回复内容
             replies = self.main_window.load_resource_file('自动回复.txt')
             if not replies:
-                # 如果没有配置文件，使用默认回复
                 replies = [
                     "您好！我现在不在线，稍后回复您。",
                     "感谢您的消息，我会尽快回复。",
@@ -746,9 +870,14 @@ class TelegramAsyncHandler:
             self.signals.log.emit(f"📝 {phone} 选择的回复内容: {reply_message}")
         
             await client.send_message(sender, reply_message)
+            
+            # 记录自动回复历史
+            if phone not in self.auto_reply_history:
+                self.auto_reply_history[phone] = {}
+            self.auto_reply_history[phone][sender_id] = current_time
         
             sender_name = self.get_user_display_name(sender)
-            self.signals.log.emit(f"✅ {phone} 已向 {sender_name} 发送自动回复")
+            self.signals.log.emit(f"✅ {phone} 已向 {sender_name} 发送自动回复（24小时内不再重复）")
         
         except Exception as e:
             self.signals.log.emit(f"❌ {phone} 发送自动回复失败: {str(e)}")
@@ -836,28 +965,6 @@ class TelegramAsyncHandler:
         if not display_name:
             display_name = getattr(user, 'username', '') or f"用户{user.id}"
         return display_name
-
-    async def is_contact_enhanced(self, client, user):
-        """增强的联系人检查"""
-        try:
-            self.signals.log.emit(f"🔍 检查用户 {user.id} 是否为联系人...")
-        
-            # 获取联系人列表
-            contacts = await client.get_contacts()
-            self.signals.log.emit(f"📋 获取到 {len(contacts)} 个联系人")
-        
-            for contact in contacts:
-                if contact.id == user.id:
-                    self.signals.log.emit(f"✅ 用户 {user.id} 是联系人")
-                    return True
-        
-            self.signals.log.emit(f"❌ 用户 {user.id} 不是联系人")
-            return False
-        
-        except Exception as e:
-            self.signals.log.emit(f"⚠️ 检查联系人时出错: {str(e)}")
-            # 出错时假设是陌生人
-            return False
 
     async def send_bot_notification_enhanced(self, phone, message_data):
         """增强的机器人通知 - 修复配置解析"""
@@ -982,6 +1089,43 @@ class TelegramAsyncHandler:
             self.signals.log.emit(f"❌ Bot消息发送异常: {str(e)}")
             import traceback
             self.signals.log.emit(f"详细错误: {traceback.format_exc()}")
+            return False
+
+    async def send_manual_reply_to_stranger(self, phone, sender_id, reply_message):
+        """向陌生人发送手动回复"""
+        client = await self.ensure_client_connected(phone)
+        if not client:
+            self.signals.log.emit(f"{phone} 客户端连接失败")
+            return False
+        
+        try:
+            self.signals.log.emit(f"{phone} 开始发送手动回复给用户 {sender_id}")
+            
+            # 获取发送者实体
+            sender_entity = await client.get_entity(sender_id)
+            
+            # 标记消息为已读
+            try:
+                await client.send_read_acknowledge(sender_entity)
+                self.signals.log.emit(f"📖 {phone} 已读与用户 {sender_id} 的对话")
+            except Exception as read_error:
+                self.signals.log.emit(f"⚠️ {phone} 标记已读失败: {str(read_error)}")
+            
+            # 发送回复消息
+            await client.send_message(sender_entity, reply_message)
+            
+            self.signals.log.emit(f"✅ {phone} 手动回复发送成功给用户 {sender_id}")
+            return True
+            
+        except Exception as e:
+            self.signals.log.emit(f"❌ {phone} 发送手动回复失败: {str(e)}")
+            
+            # 检测发送回复时的账号状态
+            if self.is_account_banned_or_frozen(e):
+                status = self.get_account_status_from_error(e)
+                self.signals.log.emit(f"{phone} 发送回复时发现账号异常: {status}")
+                self.signals.update_account_status.emit(phone, {'status': status})
+            
             return False
         
     async def update_profile(self, phone, profile_data):
@@ -2272,6 +2416,84 @@ class TelegramAsyncHandler:
         except Exception as e:
             self.signals.log.emit(f"{phone} 设置隐私时发生错误: {str(e)}")
             return False
+        
+    async def get_privacy_settings(self, phone):
+        """获取隐私设置"""
+        client = await self.ensure_client_connected(phone)
+        if not client:
+            self.signals.log.emit(f"{phone} 客户端连接失败")
+            return None
+        
+        try:
+            # 导入隐私设置相关的模块
+            from telethon.tl.functions.account import GetPrivacyRequest
+            from telethon.tl.types import (
+                InputPrivacyKeyPhoneNumber, InputPrivacyKeyStatusTimestamp
+            )
+            
+            self.signals.log.emit(f"{phone} 开始获取隐私设置...")
+            
+            privacy_info = {}
+            
+            # 获取手机号码隐私设置
+            try:
+                phone_privacy = await client(GetPrivacyRequest(key=InputPrivacyKeyPhoneNumber()))
+                # 解析隐私规则
+                if phone_privacy.rules:
+                    rule = phone_privacy.rules[0]
+                    if hasattr(rule, '__class__'):
+                        rule_name = rule.__class__.__name__
+                        if 'AllowAll' in rule_name:
+                            privacy_info['phone_privacy'] = 0  # 所有人可见
+                        elif 'AllowContacts' in rule_name:
+                            privacy_info['phone_privacy'] = 1  # 仅联系人可见
+                        elif 'DisallowAll' in rule_name:
+                            privacy_info['phone_privacy'] = 2  # 任何人都不可见
+                        else:
+                            privacy_info['phone_privacy'] = -1  # 未知
+                    else:
+                        privacy_info['phone_privacy'] = -1
+                else:
+                    privacy_info['phone_privacy'] = -1
+                
+                self.signals.log.emit(f"{phone} 手机号码隐私获取成功")
+            except Exception as e:
+                self.signals.log.emit(f"{phone} 获取手机号码隐私失败: {str(e)}")
+                privacy_info['phone_privacy'] = -1
+            
+            # 获取最后上线时间隐私设置
+            try:
+                lastseen_privacy = await client(GetPrivacyRequest(key=InputPrivacyKeyStatusTimestamp()))
+                # 解析隐私规则
+                if lastseen_privacy.rules:
+                    rule = lastseen_privacy.rules[0]
+                    if hasattr(rule, '__class__'):
+                        rule_name = rule.__class__.__name__
+                        if 'AllowAll' in rule_name:
+                            privacy_info['lastseen_privacy'] = 0  # 所有人可见
+                        elif 'AllowContacts' in rule_name:
+                            privacy_info['lastseen_privacy'] = 1  # 仅联系人可见
+                        elif 'DisallowAll' in rule_name:
+                            privacy_info['lastseen_privacy'] = 2  # 任何人都不可见
+                        else:
+                            privacy_info['lastseen_privacy'] = -1  # 未知
+                    else:
+                        privacy_info['lastseen_privacy'] = -1
+                else:
+                    privacy_info['lastseen_privacy'] = -1
+                
+                self.signals.log.emit(f"{phone} 最后上线时间隐私获取成功")
+            except Exception as e:
+                self.signals.log.emit(f"{phone} 获取最后上线时间隐私失败: {str(e)}")
+                privacy_info['lastseen_privacy'] = -1
+            
+            self.signals.log.emit(f"{phone} 隐私设置获取完成")
+            return privacy_info
+            
+        except Exception as e:
+            self.signals.log.emit(f"{phone} 获取隐私设置时发生错误: {str(e)}")
+            return None
+
     async def refresh_account_profile(self, phone):
         """刷新账号资料"""
         client = await self.ensure_client_connected(phone)
@@ -2321,6 +2543,7 @@ class TelegramAsyncHandler:
             else:
                 self.signals.log.emit(f"{phone} 获取资料失败: {str(e)}")
             return False
+
     async def stop_single_task(self, phone, task_type):
         """停止单个账号的特定任务"""
         self.init_stop_flags(phone)
@@ -2375,3 +2598,14 @@ class TelegramAsyncHandler:
         import re
         match = re.search(r'(\d+)', error_msg)
         return match.group(1) if match else "未知"
+    def save_device_assignments(self):
+        """保存设备分配记录"""
+        return self.device_spoofing.save_device_assignments()
+    
+    def get_device_summary(self):
+        """获取设备分配摘要"""
+        return self.device_spoofing.get_device_summary()
+    
+    def print_device_summary(self):
+        """打印设备分配摘要"""
+        return self.device_spoofing.print_device_summary()
