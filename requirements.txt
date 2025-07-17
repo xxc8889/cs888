@@ -1,0 +1,12 @@
+PyQt6==6.7.0
+PyQt6-Qt6==6.7.0
+PyQt6-sip==13.6.0
+telethon==1.40.0
+cryptg==0.4.0
+Pillow==10.2.0
+pyaes==1.6.1
+rsa==4.9
+aiofiles==23.2.1
+async-timeout==4.0.3
+aiohttp==3.9.1
+beautifulsoup4==4.12.2
