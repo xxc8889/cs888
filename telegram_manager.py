@@ -14,7 +14,6 @@ from device_manager_dialog import DeviceManagerDialog
 import shutil
 import threading
 import queue
-
 # 设置日志
 Path('logs').mkdir(exist_ok=True)
 logging.basicConfig(
@@ -641,8 +640,6 @@ class TaskListDialog(QDialog):
         self.refresh_tasks()
 
 class APILoginDialog(QDialog):
-    """API接码登录对话框"""
-    
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
@@ -650,6 +647,11 @@ class APILoginDialog(QDialog):
         self.config_manager = parent.config_manager
         self.async_handler = parent.async_handler
         self.event_loop_thread = parent.event_loop_thread
+        
+        # ✅ 关键修复：添加API分配锁和分配记录
+        self.api_allocation_lock = threading.Lock()  # 线程锁
+        self.allocated_api_ids = set()  # 记录已分配的API ID
+        
         self.setupUI()
     
         # 用于存储正在处理的账号和链接
@@ -742,51 +744,58 @@ class APILoginDialog(QDialog):
         return accounts
     
     def get_unused_api_config(self):
-        """获取未使用的API配置 - 防重复版本"""
-        # 获取所有API配置
-        api_configs = self.parent.config_manager.load_api_configs()
-        if not api_configs:
-            return None
-        
-        # 获取所有已使用的API ID
-        valid_statuses = ['在线', '离线', '未检测', '未登录']
-        used_api_ids = set()
-        
-        # 从已有账号中获取使用的API ID
-        for acc in self.accounts.values():
-            api_id = acc.get('api_id')
-            if api_id:
-                used_api_ids.add(str(api_id))
-        
-        # 从正在处理的账号中获取使用的API ID（关键修复）
-        if hasattr(self, 'api_login_dialog') and self.api_login_dialog:
-            for phone, account_info in self.api_login_dialog.processing_accounts.items():
+        """获取未使用的API配置 - 修复并发竞争条件版本"""
+        # ✅ 使用线程锁确保API分配的原子性
+        with self.api_allocation_lock:
+            # 获取所有API配置
+            api_configs = self.parent.config_manager.load_api_configs()
+            if not api_configs:
+                return None
+            
+            # 获取所有已使用的API ID
+            valid_statuses = ['在线', '离线', '未检测', '未登录']
+            used_api_ids = set()
+            
+            # 1. 从已有账号中获取使用的API ID
+            for acc in self.accounts.values():
+                api_id = acc.get('api_id')
+                if api_id:
+                    used_api_ids.add(str(api_id))
+            
+            # 2. 从当前对话框正在处理的账号中获取
+            for phone, account_info in self.processing_accounts.items():
                 if 'api_id' in account_info:
                     used_api_ids.add(str(account_info['api_id']))
-        
-        self.parent.log(f"已使用的API ID: {used_api_ids}")
-        self.parent.log(f"正在处理的账号: {list(self.processing_accounts.keys())}")
-        # 3. 从临时客户端获取
-        if self.async_handler:
-            for phone in self.async_handler.temp_clients:
-                # 可以通过某种方式追踪临时客户端使用的API
-                pass
-        # 查找未使用的API配置
-        for config in api_configs:
-            if config['api_id'] not in used_api_ids:
-                self.parent.log(f"分配API ID: {config['api_id']} 给新账号")
-                return config
-        
-        # 如果没有未使用的，返回None
-        self.parent.log("警告：没有可用的API配置")
-        return None
+            
+            # ✅ 3. 从本次分配记录中获取（关键修复）
+            used_api_ids.update(self.allocated_api_ids)
+            
+            self.parent.log(f"已使用的API ID: {used_api_ids}")
+            self.parent.log(f"本次已分配的API ID: {self.allocated_api_ids}")
+            
+            # 查找未使用的API配置
+            for config in api_configs:
+                config_id = str(config['api_id'])
+                if config_id not in used_api_ids:
+                    # ✅ 立即标记为已分配，防止其他并发调用使用相同API
+                    self.allocated_api_ids.add(config_id)
+                    self.parent.log(f"分配API ID: {config_id} 给新账号")
+                    return config
+            
+            # 如果没有未使用的，返回None
+            self.parent.log("警告：没有可用的API配置")
+            return None
     
     def start_login_process(self):
-        """开始登录流程"""
+        """开始登录流程 - 增强版本"""
         accounts = self.parse_accounts()
         if not accounts:
             QMessageBox.warning(self, "警告", "没有有效的账号信息")
             return
+        
+        # ✅ 重置分配记录
+        with self.api_allocation_lock:
+            self.allocated_api_ids.clear()
         
         # 清空状态表格
         self.status_table.setRowCount(0)
@@ -820,7 +829,7 @@ class APILoginDialog(QDialog):
             }
             
             # 延迟启动每个账号的处理，避免同时发送太多请求
-            QTimer.singleShot(i * 2000, lambda p=phone: self.process_account(p))
+            QTimer.singleShot(i * 6000, lambda p=phone: self.process_account(p))
     
     def add_status_row(self, phone, api_url, status):
         """添加状态行到表格"""
@@ -1362,8 +1371,16 @@ class APILoginDialog(QDialog):
         self.check_all_completed()
     
     def stop_account_login(self, phone, update_ui=True):
-        """停止单个账号的登录 - 改进的清理版本"""
+        """停止单个账号的登录 - 增强版本，释放API分配"""
         self.parent.log(f"{phone} 开始停止登录流程...")
+        
+        # ✅ 释放分配的API ID
+        if phone in self.processing_accounts:
+            api_id = str(self.processing_accounts[phone].get('api_id', ''))
+            if api_id:
+                with self.api_allocation_lock:
+                    self.allocated_api_ids.discard(api_id)
+                    self.parent.log(f"{phone} 释放API ID: {api_id}")
         
         # 1. 停止轮询计时器
         if hasattr(self, 'timers') and phone in self.timers:
@@ -1421,7 +1438,7 @@ class APILoginDialog(QDialog):
         self.parent.log(f"{phone} 登录流程已完全停止")
     
     def stop_all_logins(self):
-        """停止所有登录 - 改进版本"""
+        """停止所有登录 - 增强版本"""
         self.parent.log("开始停止所有登录流程...")
         
         # 复制列表避免在迭代时修改
@@ -1430,6 +1447,11 @@ class APILoginDialog(QDialog):
         # 停止所有账号的登录
         for phone in phones:
             self.stop_account_login(phone)
+        
+        # ✅ 清空所有分配记录
+        with self.api_allocation_lock:
+            self.allocated_api_ids.clear()
+            self.parent.log("已清空所有API分配记录")
         
         # 额外的全局清理
         async def cleanup_all_clients():
@@ -1504,7 +1526,7 @@ class AccountManager(QMainWindow):
         self.config_manager = ConfigManager()
         self.event_loop_thread = AsyncEventLoopThread()
         self.running_tasks = {}  # 正在运行的任务 {phone_tasktype: task_info}
-        
+        self.program_remark = ""  # 存储程序备注
         # 创建必要的文件夹
         self.create_directories()
         
@@ -2033,6 +2055,20 @@ class AccountManager(QMainWindow):
         self.task_status_label.setStyleSheet("color: white; font-weight: bold; padding: 0 10px;")
         toolbar.addWidget(self.task_status_label)
         
+        # 👇 添加程序备注标签
+        self.program_remark_label = QLabel("📝 未命名设备")
+        self.program_remark_label.setStyleSheet("""
+            color: #FFE082; 
+            font-weight: bold; 
+            padding: 0 10px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 4px;
+            background-color: rgba(255, 255, 255, 0.1);
+        """)
+        self.program_remark_label.setToolTip("双击编辑程序备注")
+        self.program_remark_label.mouseDoubleClickEvent = self.edit_program_remark
+        toolbar.addWidget(self.program_remark_label)
+
         return toolbar
     
     def create_task_panel(self):
@@ -6225,6 +6261,64 @@ class AccountManager(QMainWindow):
         else:
             self.log(f"警告: 收到资料更新信号但账号不存在: {clean_phone}")
     
+    def load_program_remark(self):
+        """加载程序备注配置"""
+        try:
+            remark_file = Path('resources/program_remark.txt')
+            if remark_file.exists():
+                with open(remark_file, 'r', encoding='utf-8') as f:
+                    self.program_remark = f.read().strip()
+            else:
+                self.program_remark = ""
+            
+            # 更新显示
+            self.update_program_remark_display()
+                    
+        except Exception as e:
+            self.log(f"加载程序备注失败: {str(e)}")
+            self.program_remark = ""
+            self.update_program_remark_display()
+
+    def save_program_remark(self):
+        """保存程序备注配置"""
+        try:
+            # 保存到文件
+            remark_file = Path('resources/program_remark.txt')
+            with open(remark_file, 'w', encoding='utf-8') as f:
+                f.write(self.program_remark)
+            
+            self.log(f"程序备注已保存: {self.program_remark}")
+            
+        except Exception as e:
+            self.log(f"保存程序备注失败: {str(e)}")
+
+    def update_program_remark_display(self):
+        """更新程序备注显示"""
+        if hasattr(self, 'program_remark_label'):
+            display_text = f"📝 {self.program_remark}" if self.program_remark else "📝 未命名设备"
+            self.program_remark_label.setText(display_text)
+
+    def edit_program_remark(self, event):
+        """双击编辑程序备注"""
+        current_remark = self.program_remark if self.program_remark else ""
+        
+        new_remark, ok = QInputDialog.getText(
+            self, 
+            "编辑程序备注", 
+            "请输入程序备注（用于识别不同设备）:",
+            QLineEdit.EchoMode.Normal,
+            current_remark
+        )
+        
+        if ok:
+            self.program_remark = new_remark.strip()
+            self.save_program_remark()
+            self.update_program_remark_display()
+
+    def get_program_remark(self):
+        """获取程序备注，如果为空则返回默认值"""
+        return self.program_remark if self.program_remark else "未命名设备"
+
     def save_config(self):
         """保存配置"""
         # 更新设置
@@ -6269,6 +6363,9 @@ class AccountManager(QMainWindow):
             # 加载账号
             self.accounts = self.config_manager.get_all_accounts()
             
+            # 加载程序备注
+            self.load_program_remark()
+
             # 加载设置
             self.join_interval_spin.setValue(
                 self.config_manager.get_setting('join_interval', 60)
